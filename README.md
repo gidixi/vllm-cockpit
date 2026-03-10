@@ -163,12 +163,32 @@ vllm serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 --host 0.0.0.0 --port 8000 --trust
 
 ## Web UI
 
-The Web UI allows you to:
+The Web UI provides an intuitive interface to manage vLLM. Here are some screenshots of the main features:
+
+### Configuration Page
+![Configuration](screenshots/01-home-configurazione.png)
+*Configure vLLM parameters, save/load configurations, and start/stop the server*
+
+### Saved Models
+![Models](screenshots/02-modelli.png)
+*View and manage saved model configurations*
+
+### GPU Monitoring
+![GPU Monitoring](screenshots/03-gpu-monitoring.png)
+*Monitor GPU usage and performance metrics*
+
+### Logs
+![Logs](screenshots/04-logs.png)
+*View real-time logs from vLLM server*
+
+**Features:**
 - ⚙️ Configure all vLLM parameters (model, port, GPU memory, etc.)
 - ▶️ Start vLLM with desired parameters
 - ⏹️ Stop vLLM
 - 📋 View logs in real-time
 - 📊 Monitor server status
+- 💾 Save and load configurations
+- 📁 Manage multiple model configurations
 
 **Configurable parameters:**
 - HuggingFace Model
