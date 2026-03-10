@@ -1,0 +1,65 @@
+services:
+  # Backend API per controllare vLLM
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vllm-backend
+    # Esegui come utente host (UID/GID) così la cache Hugging Face resta di tua proprietà (Docker ↔ locale senza chown)
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      # Monta il venv esistente per avviare vLLM
+      - ./venv:/app/venv:ro
+      # Monta il server.js per permettere modifiche senza rebuild
+      - ./backend/server.js:/app/server.js:ro
+      # Monta la directory per i modelli (cache HuggingFace)
+      # Monta la cache dell'utente gds in una posizione accessibile nel container
+      - /home/gds/.cache/huggingface:/mnt/huggingface-gds
+      # Monta anche la cache generica (se esiste)
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      # Monta directory per configurazioni salvate
+      - ./configs:/app/configs
+    environment:
+      - PATH=/app/venv/bin:/usr/local/bin:/usr/bin:/bin
+      - PYTHONPATH=/app/venv/lib/python3.11/site-packages
+      - VIRTUAL_ENV=/app/venv
+    ports:
+      - "3001:3001"
+      - "8000:8000"   # vLLM API (chat/completions)
+    networks:
+      - vllm-network
+    # Supporto GPU
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # Frontend React (dev mode)
+  frontend:
+    build:
+      context: ./web-ui
+      dockerfile: Dockerfile
+    container_name: vllm-frontend
+    volumes:
+      - ./web-ui/src:/app/src
+      - ./web-ui/public:/app/public
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:3001
+      - CHOKIDAR_USEPOLLING=true
+    networks:
+      - vllm-network
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+networks:
+  vllm-network:
+    driver: bridge
+    name: vllm-network

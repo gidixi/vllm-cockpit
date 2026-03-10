@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# vLLM specific
+*.log
+vllm.log
+
+# HuggingFace cache
+.cache/
+*.cache
+~/.cache/huggingface/
+/mnt/huggingface-gds/
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config files with sensitive data
+configs/*.json
+!configs/.gitkeep
+
+# Node modules (for web-ui)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build files
+dist/
+build/
+*.egg-info/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Logs
+logs/
+*.log.*
+
+# Environment variables
+.env
+.env.local
