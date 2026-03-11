@@ -17,6 +17,12 @@ app.use(bodyParser.json());
 let vllmProcess = null;
 let vllmLogs = [];
 let vllmStatus = 'stopped';
+let lastStartedConfig = { port: 8000 };
+
+function getVllmBaseUrl() {
+  const port = lastStartedConfig?.port || 8000;
+  return `http://127.0.0.1:${port}`;
+}
 
 // Funzione helper per contare le GPU disponibili
 async function getAvailableGpuCount() {
@@ -51,6 +57,7 @@ async function startVLLM(config) {
 
   vllmStatus = 'starting';
   vllmLogs = [];
+  lastStartedConfig = { ...config };
 
   // Costruisci il comando vLLM
   // Nota: il positional è model_tag, ma l'engine usa args.model (default Qwen se non passato).
@@ -266,6 +273,31 @@ async function startVLLM(config) {
   }, 3000);
 
   return { success: true, message: 'vLLM avviato' };
+}
+
+async function callVllm(pathname, options = {}, timeoutMs = 120000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${getVllmBaseUrl()}${pathname}`, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.headers || {}),
+      },
+    });
+    const text = await response.text();
+    let parsedBody = null;
+    try {
+      parsedBody = text ? JSON.parse(text) : null;
+    } catch (_) {
+      parsedBody = text;
+    }
+    return { response, body: parsedBody };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 // Funzione per fermare vLLM
@@ -522,6 +554,118 @@ app.get('/api/gpus', async (req, res) => {
       available: false,
       error: error.message || 'nvidia-smi non disponibile o nessuna GPU rilevata'
     });
+  }
+});
+
+// Modelli esposti dall'API OpenAI-compatible di vLLM
+app.get('/api/vllm/models', async (req, res) => {
+  try {
+    const { response, body } = await callVllm('/v1/models', {}, 10000);
+    if (!response.ok) {
+      return res.status(response.status).json({
+        error: 'Errore nel recupero modelli da vLLM',
+        details: body,
+      });
+    }
+    res.json(body);
+  } catch (error) {
+    const message = error.name === 'AbortError'
+      ? 'Timeout nel recupero modelli da vLLM'
+      : `vLLM non raggiungibile: ${error.message}`;
+    res.status(502).json({ error: message });
+  }
+});
+
+// Chat test: proxy verso /v1/chat/completions
+app.post('/api/chat', async (req, res) => {
+  try {
+    const requestStartedAt = Date.now();
+    const {
+      messages,
+      systemPrompt,
+      model,
+      temperature = 0.7,
+      max_tokens = 512,
+    } = req.body || {};
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages deve essere un array non vuoto' });
+    }
+
+    const sanitizedMessages = messages
+      .filter((m) => m && typeof m.content === 'string' && m.content.trim() !== '')
+      .map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
+
+    if (sanitizedMessages.length === 0) {
+      return res.status(400).json({ error: 'Nessun messaggio valido da inviare a vLLM' });
+    }
+
+    let selectedModel = (typeof model === 'string' && model.trim() !== '') ? model.trim() : '';
+    if (!selectedModel) {
+      const modelResult = await callVllm('/v1/models', {}, 10000);
+      if (modelResult.response.ok && Array.isArray(modelResult.body?.data) && modelResult.body.data.length > 0) {
+        selectedModel = modelResult.body.data[0].id;
+      }
+    }
+
+    if (!selectedModel) {
+      return res.status(400).json({
+        error: 'Nessun modello disponibile. Avvia vLLM e verifica /v1/models.',
+      });
+    }
+
+    const finalMessages = [];
+    if (typeof systemPrompt === 'string' && systemPrompt.trim() !== '') {
+      finalMessages.push({ role: 'system', content: systemPrompt.trim() });
+    }
+    finalMessages.push(...sanitizedMessages);
+
+    const payload = {
+      model: selectedModel,
+      messages: finalMessages,
+      temperature: Number.isFinite(Number(temperature)) ? Number(temperature) : 0.7,
+      max_tokens: Number.isFinite(Number(max_tokens)) ? Number(max_tokens) : 512,
+      stream: false,
+    };
+
+    const { response, body } = await callVllm('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      return res.status(response.status).json({
+        error: 'Errore dalla chat vLLM',
+        details: body,
+      });
+    }
+
+    const usage = body && typeof body === 'object' ? (body.usage || null) : null;
+    const proxyStats = {
+      latencyMs: Date.now() - requestStartedAt,
+      model: selectedModel,
+      usage: usage
+        ? {
+            promptTokens: usage.prompt_tokens || 0,
+            completionTokens: usage.completion_tokens || 0,
+            totalTokens: usage.total_tokens || 0,
+          }
+        : null,
+    };
+
+    if (body && typeof body === 'object' && !Array.isArray(body)) {
+      return res.json({
+        ...body,
+        _proxyStats: proxyStats,
+      });
+    }
+
+    return res.json({ data: body, _proxyStats: proxyStats });
+  } catch (error) {
+    const message = error.name === 'AbortError'
+      ? 'Timeout durante la generazione della risposta'
+      : `Errore chiamata chat: ${error.message}`;
+    return res.status(502).json({ error: message });
   }
 });
 

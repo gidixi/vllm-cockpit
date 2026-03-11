@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import './App.css';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:3001';
@@ -23,6 +25,15 @@ function App() {
   const [downloadModelId, setDownloadModelId] = useState('');
   const [downloading, setDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState('');
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatError, setChatError] = useState('');
+  const [chatSystemPrompt, setChatSystemPrompt] = useState('Sei un assistente utile e conciso.');
+  const [chatTemperature, setChatTemperature] = useState(0.7);
+  const [chatMaxTokens, setChatMaxTokens] = useState(512);
+  const [chatModel, setChatModel] = useState('');
+  const [chatModels, setChatModels] = useState([]);
   const [expandedSections, setExpandedSections] = useState({
     base: true,
     parallelism: false,
@@ -78,6 +89,7 @@ function App() {
     mmProcessorCacheType: '',
     reasoningParser: '',
   });
+  const chatListRef = useRef(null);
 
   useEffect(() => {
     checkStatus();
@@ -91,6 +103,18 @@ function App() {
       clearInterval(gpuInterval);
     };
   }, []);
+
+  useEffect(() => {
+    if (activeTab === 'chat') {
+      fetchChatModels();
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (chatListRef.current) {
+      chatListRef.current.scrollTop = chatListRef.current.scrollHeight;
+    }
+  }, [chatMessages, chatLoading]);
 
   const fetchSavedConfigs = async () => {
     try {
@@ -394,6 +418,68 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
+  const fetchChatModels = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/api/vllm/models`);
+      const availableModels = response?.data?.data || [];
+      setChatModels(availableModels);
+      if (!chatModel && availableModels.length > 0) {
+        setChatModel(availableModels[0].id);
+      }
+      setChatError('');
+    } catch (error) {
+      setChatModels([]);
+      setChatError(error.response?.data?.error || 'Impossibile leggere i modelli da vLLM. Hai avviato il server?');
+    }
+  };
+
+  const handleSendMessage = async () => {
+    const prompt = chatInput.trim();
+    if (!prompt || chatLoading) return;
+
+    const nextMessages = [...chatMessages, { role: 'user', content: prompt }];
+    setChatMessages(nextMessages);
+    setChatInput('');
+    setChatLoading(true);
+    setChatError('');
+
+    try {
+      const response = await axios.post(`${API_URL}/api/chat`, {
+        messages: nextMessages,
+        systemPrompt: chatSystemPrompt,
+        model: chatModel,
+        temperature: chatTemperature,
+        max_tokens: chatMaxTokens,
+      });
+
+      const assistantText = response?.data?.choices?.[0]?.message?.content;
+      const replyStats = response?.data?._proxyStats || null;
+      if (!assistantText) {
+        throw new Error('Risposta vuota dal modello');
+      }
+
+      setChatMessages((prev) => [...prev, { role: 'assistant', content: assistantText, stats: replyStats }]);
+    } catch (error) {
+      setChatError(error.response?.data?.error || error.response?.data?.details?.error?.message || error.message);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
+  const getChatTotals = () => {
+    return chatMessages.reduce((acc, msg) => {
+      if (msg.role !== 'assistant' || !msg.stats || !msg.stats.usage) return acc;
+      acc.prompt += msg.stats.usage.promptTokens || 0;
+      acc.completion += msg.stats.usage.completionTokens || 0;
+      acc.total += msg.stats.usage.totalTokens || 0;
+      return acc;
+    }, { prompt: 0, completion: 0, total: 0 });
+  };
+
+  const MarkdownMessage = ({ content }) => (
+    <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+  );
+
   const handleUploadConfig = (event) => {
     const file = event.target.files[0];
     if (!file) return;
@@ -557,6 +643,16 @@ function App() {
                   <p>Logs</p>
                 </a>
               </li>
+              <li className="nav-item">
+                <a
+                  href="#"
+                  className={`nav-link ${activeTab === 'chat' ? 'active' : ''}`}
+                  onClick={(e) => { e.preventDefault(); setActiveTab('chat'); }}
+                >
+                  <i className="nav-icon fas fa-comments"></i>
+                  <p>Chat Test</p>
+                </a>
+              </li>
             </ul>
           </nav>
         </div>
@@ -574,6 +670,7 @@ function App() {
                   {activeTab === 'models' && '🤖 Gestione Modelli'}
                   {activeTab === 'monitor' && '📊 Monitoraggio GPU'}
                   {activeTab === 'logs' && '📋 Logs vLLM'}
+                  {activeTab === 'chat' && '💬 Chat Test Modello'}
                 </h1>
               </div>
               <div className="col-sm-6">
@@ -584,6 +681,7 @@ function App() {
                     {activeTab === 'models' && 'Modelli'}
                     {activeTab === 'monitor' && 'Monitoraggio'}
                     {activeTab === 'logs' && 'Logs'}
+                    {activeTab === 'chat' && 'Chat Test'}
                   </li>
                 </ol>
               </div>
@@ -1335,6 +1433,156 @@ function App() {
                           </div>
                         ))
                       )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'chat' && (
+            <div className="row">
+              <div className="col-12">
+                <div className="card">
+                  <div className="card-header">
+                    <h3 className="card-title">
+                      <i className="fas fa-comments mr-2"></i>
+                      Chat di Test vLLM
+                    </h3>
+                    <div className="card-tools">
+                      <button onClick={fetchChatModels} className="btn btn-sm btn-primary">
+                        <i className="fas fa-sync-alt"></i> Aggiorna Modelli
+                      </button>
+                    </div>
+                  </div>
+                  <div className="card-body">
+                    <div className="form-row">
+                      <div className="form-group">
+                        <label>Modello:</label>
+                        <select value={chatModel} onChange={(e) => setChatModel(e.target.value)}>
+                          {chatModels.map((m) => (
+                            <option key={m.id} value={m.id}>{m.id}</option>
+                          ))}
+                        </select>
+                        <small>Viene letta la lista direttamente da `vLLM /v1/models`.</small>
+                      </div>
+                      <div className="form-group">
+                        <label>Temperature:</label>
+                        <input
+                          type="number"
+                          min="0"
+                          max="2"
+                          step="0.1"
+                          value={chatTemperature}
+                          onChange={(e) => setChatTemperature(parseFloat(e.target.value) || 0)}
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>Max Tokens:</label>
+                        <input
+                          type="number"
+                          min="1"
+                          value={chatMaxTokens}
+                          onChange={(e) => setChatMaxTokens(parseInt(e.target.value, 10) || 1)}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="form-group">
+                      <label>System Prompt (opzionale):</label>
+                      <input
+                        type="text"
+                        value={chatSystemPrompt}
+                        onChange={(e) => setChatSystemPrompt(e.target.value)}
+                        placeholder="Istruzioni di comportamento per l'assistente"
+                      />
+                    </div>
+
+                    {chatError && (
+                      <div className="alert alert-danger">
+                        <i className="fas fa-exclamation-circle mr-2"></i>
+                        {chatError}
+                      </div>
+                    )}
+
+                    <div className="chat-stats-summary">
+                      {(() => {
+                        const totals = getChatTotals();
+                        return (
+                          <>
+                            <span><strong>Token prompt:</strong> {totals.prompt}</span>
+                            <span><strong>Token output:</strong> {totals.completion}</span>
+                            <span><strong>Token totali:</strong> {totals.total}</span>
+                          </>
+                        );
+                      })()}
+                    </div>
+
+                    <div className="chat-box" ref={chatListRef}>
+                      {chatMessages.length === 0 ? (
+                        <div className="chat-empty">
+                          Scrivi un messaggio per testare il modello.
+                        </div>
+                      ) : (
+                        chatMessages.map((message, index) => (
+                          <div key={index} className={`chat-message ${message.role}`}>
+                            <div className="chat-role">
+                              {message.role === 'user' ? 'Tu' : 'Assistente'}
+                            </div>
+                            <div className="chat-content markdown-body">
+                              <MarkdownMessage content={message.content} />
+                            </div>
+                            {message.role === 'assistant' && message.stats && (
+                              <div className="chat-message-stats">
+                                <span>Latenza: {message.stats.latencyMs} ms</span>
+                                {message.stats.usage && (
+                                  <span>
+                                    Token P/C/T: {message.stats.usage.promptTokens}/
+                                    {message.stats.usage.completionTokens}/
+                                    {message.stats.usage.totalTokens}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        ))
+                      )}
+                      {chatLoading && (
+                        <div className="chat-message assistant">
+                          <div className="chat-role">Assistente</div>
+                          <div className="chat-content">Sto generando la risposta...</div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="chat-input-row">
+                      <input
+                        type="text"
+                        value={chatInput}
+                        onChange={(e) => setChatInput(e.target.value)}
+                        placeholder="Scrivi un messaggio..."
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            handleSendMessage();
+                          }
+                        }}
+                        disabled={chatLoading}
+                      />
+                      <button
+                        onClick={handleSendMessage}
+                        className="btn btn-start"
+                        disabled={chatLoading || !chatInput.trim()}
+                      >
+                        {chatLoading ? 'Invio...' : 'Invia'}
+                      </button>
+                      <button
+                        onClick={() => setChatMessages([])}
+                        className="btn btn-stop"
+                        disabled={chatLoading || chatMessages.length === 0}
+                      >
+                        Pulisci
+                      </button>
                     </div>
                   </div>
                 </div>
