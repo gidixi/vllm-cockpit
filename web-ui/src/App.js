@@ -30,6 +30,7 @@ function App() {
     quantization: false,
     gpu: false,
     kvCache: false,
+    tools: false,
   });
   const [config, setConfig] = useState({
     // Base
@@ -68,6 +69,14 @@ function App() {
     maxNumBatchedTokens: 16384,
     enablePrefixCaching: false,
     numGpuBlocksOverride: '',
+    
+    // Tool calling e multi-modal
+    enableAutoToolChoice: false,
+    toolCallParser: '',
+    servedModelName: '',
+    mmEncoderTpMode: '',
+    mmProcessorCacheType: '',
+    reasoningParser: '',
   });
 
   useEffect(() => {
@@ -159,10 +168,32 @@ function App() {
   };
 
   const handleConfigChange = (key, value) => {
-    setConfig(prev => ({
-      ...prev,
-      [key]: typeof prev[key] === 'boolean' ? !prev[key] : value
-    }));
+    setConfig(prev => {
+      // Se è un boolean, toggle
+      if (typeof prev[key] === 'boolean') {
+        return { ...prev, [key]: !prev[key] };
+      }
+      // Altrimenti usa il valore fornito
+      return { ...prev, [key]: value };
+    });
+  };
+
+  // Helper per gestire input numerici senza causare re-render
+  const handleNumberChange = (key, value, isFloat = false) => {
+    const stringValue = value.toString().trim();
+    // Se il campo è vuoto o contiene solo segno meno, usa 0 come fallback
+    if (stringValue === '' || stringValue === '-') {
+      const defaultValue = key === 'gpuMemoryUtilization' ? 0.9 : 
+                          key === 'port' ? 8000 : 
+                          key === 'maxModelLen' ? 4096 : 0;
+      setConfig(prev => ({ ...prev, [key]: defaultValue }));
+      return;
+    }
+    // Converti solo se il valore è valido
+    const numValue = isFloat ? parseFloat(stringValue) : parseInt(stringValue, 10);
+    if (!isNaN(numValue) && isFinite(numValue)) {
+      setConfig(prev => ({ ...prev, [key]: numValue }));
+    }
   };
 
   const toggleSection = (section) => {
@@ -193,10 +224,77 @@ function App() {
     }
   };
 
+  // Configurazione di default completa
+  const getDefaultConfig = () => ({
+    // Base
+    model: 'TinyLlama/TinyLlama-1.1B-Chat-v1.0',
+    host: '0.0.0.0',
+    port: 8000,
+    trustRemoteCode: true,
+    
+    // Parallelismo
+    tensorParallelSize: 1,
+    pipelineParallelSize: 1,
+    dataParallelSize: 1,
+    
+    // Memoria GPU
+    gpuMemoryUtilization: 0.9,
+    cpuOffloadGb: 0,
+    maxModelLen: 4096,
+    kvCacheDtype: 'auto',
+    blockSize: 16,
+    swapSpace: 4,
+    
+    // Tipo di dato e quantizzazione
+    dtype: 'half',
+    quantization: '',
+    loadFormat: 'auto',
+    quantizationParamPath: '',
+    
+    // GPU Selection
+    device: 'auto',
+    distributedExecutorBackend: 'ray',
+    workerUseRay: false,
+    cudaVisibleDevices: '',
+    
+    // KV Cache e throughput
+    maxNumSeqs: 256,
+    maxNumBatchedTokens: 16384,
+    enablePrefixCaching: false,
+    numGpuBlocksOverride: '',
+    
+    // Tool calling e multi-modal
+    enableAutoToolChoice: false,
+    toolCallParser: '',
+    servedModelName: '',
+    mmEncoderTpMode: '',
+    mmProcessorCacheType: '',
+    reasoningParser: '',
+  });
+
   const handleLoadConfig = async (filename) => {
     try {
       const response = await axios.get(`${API_URL}/api/config/load/${filename}`);
-      setConfig(response.data.config);
+      const loadedConfig = response.data.config;
+      
+      // Merge con i valori di default per assicurarsi che tutti i campi siano presenti
+      const defaultConfig = getDefaultConfig();
+      const mergedConfig = { ...defaultConfig, ...loadedConfig };
+      
+      // Forza l'aggiornamento dello stato
+      setConfig(mergedConfig);
+      
+      // Assicurati di essere nella tab configurazione
+      setActiveTab('config');
+      
+      // Scroll alla sezione di configurazione dopo un breve delay
+      setTimeout(() => {
+        const configCard = document.querySelector('.card-body');
+        if (configCard) {
+          configCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, 100);
+      
       alert('✅ Configurazione caricata con successo!');
     } catch (error) {
       alert('Errore nel caricamento: ' + (error.response?.data?.error || error.message));
@@ -275,6 +373,14 @@ function App() {
   const handleUseModel = (modelName) => {
     setConfig(prev => ({ ...prev, model: modelName }));
     setActiveTab('config');
+    
+    // Scroll alla sezione di configurazione dopo un breve delay
+    setTimeout(() => {
+      const configCard = document.querySelector('.card-body');
+      if (configCard) {
+        configCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }, 100);
   };
 
   const handleDownloadConfig = () => {
@@ -296,7 +402,24 @@ function App() {
     reader.onload = (e) => {
       try {
         const loadedConfig = JSON.parse(e.target.result);
-        setConfig(loadedConfig);
+        
+        // Merge con i valori di default per assicurarsi che tutti i campi siano presenti
+        const defaultConfig = getDefaultConfig();
+        const mergedConfig = { ...defaultConfig, ...loadedConfig };
+        
+        setConfig(mergedConfig);
+        
+        // Assicurati di essere nella tab configurazione
+        setActiveTab('config');
+        
+        // Scroll alla sezione di configurazione dopo un breve delay
+        setTimeout(() => {
+          const configCard = document.querySelector('.card-body');
+          if (configCard) {
+            configCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+        }, 100);
+        
         alert('✅ Configurazione caricata dal file!');
       } catch (error) {
         alert('Errore: File JSON non valido');
@@ -577,7 +700,7 @@ function App() {
                     <input
                       type="number"
                       value={config.port}
-                      onChange={(e) => handleConfigChange('port', parseInt(e.target.value))}
+                      onChange={(e) => handleNumberChange('port', e.target.value)}
                     />
                   </div>
                 </div>
@@ -601,9 +724,16 @@ function App() {
                       type="number"
                       min="1"
                       value={config.tensorParallelSize}
-                      onChange={(e) => handleConfigChange('tensorParallelSize', parseInt(e.target.value))}
+                      onChange={(e) => handleNumberChange('tensorParallelSize', e.target.value)}
                     />
                     <small>Numero di GPU per tensor parallelism (intra-nodo)</small>
+                    {config.tensorParallelSize > 1 && gpus.length > 0 && config.tensorParallelSize > gpus.length && (
+                      <div className="alert alert-warning mt-2" style={{ padding: '0.5rem', fontSize: '0.875rem' }}>
+                        <i className="fas fa-exclamation-triangle mr-1"></i>
+                        <strong>Attenzione:</strong> Tensor Parallel Size ({config.tensorParallelSize}) è maggiore del numero di GPU disponibili ({gpus.length}). 
+                        Questo causerà un errore all'avvio. Riduci il valore a {gpus.length} o meno.
+                      </div>
+                    )}
                   </div>
                   <div className="form-group">
                     <label>Pipeline Parallel Size:</label>
@@ -611,7 +741,7 @@ function App() {
                       type="number"
                       min="1"
                       value={config.pipelineParallelSize}
-                      onChange={(e) => handleConfigChange('pipelineParallelSize', parseInt(e.target.value))}
+                      onChange={(e) => handleNumberChange('pipelineParallelSize', e.target.value)}
                     />
                     <small>Numero di nodi per pipeline parallelism (inter-nodo)</small>
                   </div>
@@ -622,7 +752,7 @@ function App() {
                     type="number"
                     min="1"
                     value={config.dataParallelSize}
-                    onChange={(e) => handleConfigChange('dataParallelSize', parseInt(e.target.value))}
+                    onChange={(e) => handleNumberChange('dataParallelSize', e.target.value)}
                   />
                   <small>Replica il modello su più istanze per aumentare throughput</small>
                 </div>
@@ -638,7 +768,7 @@ function App() {
                       min="0"
                       max="1"
                       value={config.gpuMemoryUtilization}
-                      onChange={(e) => handleConfigChange('gpuMemoryUtilization', parseFloat(e.target.value))}
+                      onChange={(e) => handleNumberChange('gpuMemoryUtilization', e.target.value, true)}
                     />
                     <small>Frazione di VRAM usata (0.0-1.0)</small>
                   </div>
@@ -648,7 +778,7 @@ function App() {
                       type="number"
                       min="0"
                       value={config.cpuOffloadGb}
-                      onChange={(e) => handleConfigChange('cpuOffloadGb', parseInt(e.target.value))}
+                      onChange={(e) => handleNumberChange('cpuOffloadGb', e.target.value)}
                     />
                     <small>GiB da offloadare su RAM CPU</small>
                   </div>
@@ -659,7 +789,7 @@ function App() {
                     <input
                       type="number"
                       value={config.maxModelLen}
-                      onChange={(e) => handleConfigChange('maxModelLen', parseInt(e.target.value))}
+                      onChange={(e) => handleNumberChange('maxModelLen', e.target.value)}
                     />
                     <small>Lunghezza massima del contesto</small>
                   </div>
@@ -683,7 +813,7 @@ function App() {
                       type="number"
                       min="1"
                       value={config.blockSize}
-                      onChange={(e) => handleConfigChange('blockSize', parseInt(e.target.value))}
+                      onChange={(e) => handleNumberChange('blockSize', e.target.value)}
                     />
                     <small>Dimensione blocchi per paging KV cache</small>
                   </div>
@@ -693,7 +823,7 @@ function App() {
                       type="number"
                       min="0"
                       value={config.swapSpace}
-                      onChange={(e) => handleConfigChange('swapSpace', parseInt(e.target.value))}
+                      onChange={(e) => handleNumberChange('swapSpace', e.target.value)}
                     />
                     <small>GiB di swap su CPU per blocchi evicted</small>
                   </div>
@@ -813,7 +943,7 @@ function App() {
                       type="number"
                       min="1"
                       value={config.maxNumSeqs}
-                      onChange={(e) => handleConfigChange('maxNumSeqs', parseInt(e.target.value))}
+                      onChange={(e) => handleNumberChange('maxNumSeqs', e.target.value)}
                     />
                     <small>Numero massimo di sequenze in batch simultaneo</small>
                   </div>
@@ -823,7 +953,7 @@ function App() {
                       type="number"
                       min="1"
                       value={config.maxNumBatchedTokens}
-                      onChange={(e) => handleConfigChange('maxNumBatchedTokens', parseInt(e.target.value))}
+                      onChange={(e) => handleNumberChange('maxNumBatchedTokens', e.target.value)}
                     />
                     <small>Token massimi per batch (influisce su throughput e VRAM)</small>
                   </div>
@@ -849,6 +979,84 @@ function App() {
                       Enable Prefix Caching
                     </label>
                     <small>Cache dei prefix condivisi (risparmia VRAM e latenza)</small>
+                  </div>
+                </div>
+              </ConfigSection>
+
+              <ConfigSection title="🔧 Tool Calling e Multi-Modal (Opzionale)" sectionKey="tools">
+                <div className="form-row">
+                  <div className="form-group checkbox">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={config.enableAutoToolChoice}
+                        onChange={() => handleConfigChange('enableAutoToolChoice')}
+                      />
+                      Enable Auto Tool Choice
+                    </label>
+                    <small>Abilita la scelta automatica degli strumenti per i modelli che supportano tool calling</small>
+                  </div>
+                  <div className="form-group">
+                    <label>Tool Call Parser:</label>
+                    <select
+                      value={config.toolCallParser}
+                      onChange={(e) => handleConfigChange('toolCallParser', e.target.value)}
+                    >
+                      <option value="">Auto (default)</option>
+                      <option value="hermes">hermes</option>
+                      <option value="qwen3_coder">qwen3_coder</option>
+                      <option value="qwen3">qwen3</option>
+                    </select>
+                    <small>Parser per interpretare le chiamate agli strumenti</small>
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label>Served Model Name:</label>
+                    <input
+                      type="text"
+                      value={config.servedModelName}
+                      onChange={(e) => handleConfigChange('servedModelName', e.target.value)}
+                      placeholder="Nome del modello esposto via API"
+                    />
+                    <small>Nome del modello come appare nell'API (lascia vuoto per usare il nome del modello)</small>
+                  </div>
+                  <div className="form-group">
+                    <label>Reasoning Parser:</label>
+                    <select
+                      value={config.reasoningParser}
+                      onChange={(e) => handleConfigChange('reasoningParser', e.target.value)}
+                    >
+                      <option value="">Nessuno</option>
+                      <option value="qwen3">qwen3</option>
+                    </select>
+                    <small>Parser per il reasoning (es. qwen3 per modelli Qwen3)</small>
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label>MM Encoder TP Mode:</label>
+                    <select
+                      value={config.mmEncoderTpMode}
+                      onChange={(e) => handleConfigChange('mmEncoderTpMode', e.target.value)}
+                    >
+                      <option value="">Nessuno</option>
+                      <option value="data">data</option>
+                      <option value="tensor">tensor</option>
+                    </select>
+                    <small>Modalità tensor parallelism per encoder multi-modale</small>
+                  </div>
+                  <div className="form-group">
+                    <label>MM Processor Cache Type:</label>
+                    <select
+                      value={config.mmProcessorCacheType}
+                      onChange={(e) => handleConfigChange('mmProcessorCacheType', e.target.value)}
+                    >
+                      <option value="">Nessuno</option>
+                      <option value="shm">shm (shared memory)</option>
+                      <option value="cpu">cpu</option>
+                    </select>
+                    <small>Tipo di cache per il processore multi-modale</small>
                   </div>
                 </div>
               </ConfigSection>

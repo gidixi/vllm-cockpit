@@ -18,10 +18,35 @@ let vllmProcess = null;
 let vllmLogs = [];
 let vllmStatus = 'stopped';
 
+// Funzione helper per contare le GPU disponibili
+async function getAvailableGpuCount() {
+  try {
+    const { stdout } = await execAsync('nvidia-smi --list-gpus | wc -l', { timeout: 5000 });
+    const count = parseInt(stdout.trim(), 10);
+    return isNaN(count) ? 0 : count;
+  } catch (error) {
+    // Se nvidia-smi non è disponibile, assumi 0 GPU
+    return 0;
+  }
+}
+
 // Funzione per avviare vLLM
-function startVLLM(config) {
+async function startVLLM(config) {
   if (vllmProcess) {
     return { error: 'vLLM è già in esecuzione' };
+  }
+
+  // Valida il numero di GPU disponibili per tensor parallelism
+  if (config.tensorParallelSize && config.tensorParallelSize > 1) {
+    const availableGpus = await getAvailableGpuCount();
+    if (availableGpus === 0) {
+      return { error: 'Nessuna GPU disponibile. Verifica che nvidia-smi funzioni correttamente.' };
+    }
+    if (config.tensorParallelSize > availableGpus) {
+      return { 
+        error: `Tensor Parallel Size (${config.tensorParallelSize}) è maggiore del numero di GPU disponibili (${availableGpus}). Riduci il valore o usa --distributed-executor-backend ray per distribuire su più nodi.` 
+      };
+    }
   }
 
   vllmStatus = 'starting';
@@ -128,6 +153,43 @@ function startVLLM(config) {
     args.push('--trust-remote-code');
   }
 
+  // Tool calling support (required for structured tool calls via OpenAI API)
+  // Auto-detect: enable by default for models known to support Hermes-style tool calling
+  const isQwen = config.model && /qwen/i.test(config.model);
+  const autoToolChoice = config.enableAutoToolChoice !== undefined
+    ? config.enableAutoToolChoice
+    : isQwen;  // Default: on for Qwen, off for others
+  const toolCallParser = config.toolCallParser && config.toolCallParser.trim() !== ''
+    ? config.toolCallParser.trim()
+    : (isQwen ? 'hermes' : '');
+
+  if (autoToolChoice) {
+    args.push('--enable-auto-tool-choice');
+    if (toolCallParser) {
+      args.push('--tool-call-parser', toolCallParser);
+    }
+  }
+
+  // Served model name
+  if (config.servedModelName && config.servedModelName.trim() !== '') {
+    args.push('--served-model-name', config.servedModelName.trim());
+  }
+
+  // Multi-modal encoder tensor parallelism mode
+  if (config.mmEncoderTpMode && config.mmEncoderTpMode.trim() !== '') {
+    args.push('--mm-encoder-tp-mode', config.mmEncoderTpMode.trim());
+  }
+
+  // Multi-modal processor cache type
+  if (config.mmProcessorCacheType && config.mmProcessorCacheType.trim() !== '') {
+    args.push('--mm-processor-cache-type', config.mmProcessorCacheType.trim());
+  }
+
+  // Reasoning parser
+  if (config.reasoningParser && config.reasoningParser.trim() !== '') {
+    args.push('--reasoning-parser', config.reasoningParser.trim());
+  }
+
   // Più log: così si capisce caricamento, download, ecc.
   args.push('--uvicorn-log-level', 'info');
 
@@ -145,6 +207,8 @@ function startVLLM(config) {
     PYTHONPATH: '/app/venv/lib/python3.11/site-packages',
     VIRTUAL_ENV: '/app/venv',
     HF_HOME: '/mnt/huggingface-gds',
+    // Riduce frammentazione VRAM (suggerito da PyTorch in caso di OOM con "reserved but unallocated" grande)
+    PYTORCH_ALLOC_CONF: 'expandable_segments:True',
     // Più log vLLM e Hugging Face (download/cache)
     VLLM_LOGGING_LEVEL: process.env.VLLM_LOGGING_LEVEL || 'INFO',
     HF_HUB_VERBOSITY: process.env.HF_HUB_VERBOSITY || 'info',
@@ -264,7 +328,7 @@ app.get('/api/check-port-8000', async (req, res) => {
 });
 
 // Start vLLM
-app.post('/api/start', (req, res) => {
+app.post('/api/start', async (req, res) => {
   const config = req.body;
   
   // Valori di default
@@ -294,15 +358,27 @@ app.post('/api/start', (req, res) => {
     maxNumBatchedTokens: 16384,
     enablePrefixCaching: false,
     numGpuBlocksOverride: '',
+    // Tool calling: auto-detected per model in startVLLM(); leave undefined to use auto-detect
+    // enableAutoToolChoice: undefined,
+    // toolCallParser: '',
+    servedModelName: '',
+    mmEncoderTpMode: '',
+    mmProcessorCacheType: '',
+    reasoningParser: '',
   };
 
   const finalConfig = { ...defaultConfig, ...config };
-  const result = startVLLM(finalConfig);
   
-  if (result.error) {
-    res.status(400).json(result);
-  } else {
-    res.json(result);
+  try {
+    const result = await startVLLM(finalConfig);
+    
+    if (result.error) {
+      res.status(400).json(result);
+    } else {
+      res.json(result);
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Errore interno del server' });
   }
 });
 
