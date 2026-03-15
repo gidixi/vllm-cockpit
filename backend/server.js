@@ -522,7 +522,7 @@ app.get('/api/gpus', async (req, res) => {
   try {
     // Prova a eseguire nvidia-smi con timeout di 5 secondi
     const { stdout } = await Promise.race([
-      execAsync('nvidia-smi --query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu --format=csv,noheader,nounits'),
+      execAsync('nvidia-smi --query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu,power.draw --format=csv,noheader,nounits'),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
     ]);
     
@@ -542,6 +542,7 @@ app.get('/api/gpus', async (req, res) => {
           memoryFree: parseInt(parts[4]) || 0,
           utilization: parseInt(parts[5]) || 0,
           temperature: parseInt(parts[6]) || 0,
+          powerDraw: parseInt(parts[7]) || 0,
         };
       });
 

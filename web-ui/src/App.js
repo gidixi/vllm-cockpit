@@ -156,6 +156,7 @@ function App() {
           newDataPoint[`gpu${index}_vram_total`] = gpu.memoryTotal;
           newDataPoint[`gpu${index}_temp`] = gpu.temperature;
           newDataPoint[`gpu${index}_util`] = gpu.utilization;
+          newDataPoint[`gpu${index}_power`] = gpu.powerDraw;
         });
 
         historyRef.current = [...historyRef.current, newDataPoint].slice(-MAX_HISTORY_POINTS);
@@ -1369,6 +1370,8 @@ function App() {
                                       <dd className="col-sm-6">{gpu.utilization}%</dd>
                                       <dt className="col-sm-6">Temperatura:</dt>
                                       <dd className="col-sm-6">{gpu.temperature}°C</dd>
+                                      <dt className="col-sm-6">Consumo Energetico:</dt>
+                                      <dd className="col-sm-6">{gpu.powerDraw} W</dd>
                                       <dt className="col-sm-6">Memoria Usata:</dt>
                                       <dd className="col-sm-6">{gpu.memoryUsed} MB</dd>
                                       <dt className="col-sm-6">Memoria Totale:</dt>
