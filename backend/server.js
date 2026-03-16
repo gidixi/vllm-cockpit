@@ -219,6 +219,10 @@ async function startVLLM(config) {
     // Più log vLLM e Hugging Face (download/cache)
     VLLM_LOGGING_LEVEL: process.env.VLLM_LOGGING_LEVEL || 'INFO',
     HF_HUB_VERBOSITY: process.env.HF_HUB_VERBOSITY || 'info',
+    // CRITICAL: Aumenta timeout RPC per evitare blocchi con reasoning mode e contesto grande
+    // Default è 10000ms (10s), troppo basso quando il modello ragiona con contesto grande
+    // Con reasoning mode, il modello può impiegare molto tempo prima di rispondere
+    VLLM_RPC_TIMEOUT: process.env.VLLM_RPC_TIMEOUT || '300000', // 5 minuti (300s)
   };
 
   // Aggiungi CUDA_VISIBLE_DEVICES se specificato
@@ -298,6 +302,36 @@ async function callVllm(pathname, options = {}, timeoutMs = 120000) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// Helper per determinare timeout appropriato basato su payload e reasoning
+function getChatTimeout(payload) {
+  // Default timeout: 2 minuti
+  let timeoutMs = 120000;
+  
+  // Se c'è reasoning mode (controlla se c'è thinking parameter o reasoning parser attivo)
+  const hasReasoning = payload?.thinking || payload?.reasoning_budget_tokens;
+  
+  // Stima dimensione payload
+  const payloadSize = JSON.stringify(payload).length;
+  
+  if (hasReasoning) {
+    // Reasoning mode: timeout molto più lungo
+    // Base: 8 minuti (480s)
+    timeoutMs = 480000;
+    
+    // Aggiungi tempo extra per payload grandi
+    if (payloadSize > 100 * 1024) { // > 100KB
+      const extraSize = payloadSize - 100 * 1024;
+      const extraTime = (extraSize / (10 * 1024)) * 2000; // 2s per 10KB
+      timeoutMs = Math.min(timeoutMs + extraTime, 900000); // Max 15 minuti
+    }
+  } else if (payloadSize > 100 * 1024) {
+    // Payload grande senza reasoning: timeout moderato
+    timeoutMs = 300000; // 5 minuti
+  }
+  
+  return timeoutMs;
 }
 
 // Funzione per fermare vLLM
@@ -629,10 +663,13 @@ app.post('/api/chat', async (req, res) => {
       stream: false,
     };
 
+    // Calcola timeout appropriato per questa richiesta
+    const chatTimeout = getChatTimeout(payload);
+    
     const { response, body } = await callVllm('/v1/chat/completions', {
       method: 'POST',
       body: JSON.stringify(payload),
-    });
+    }, chatTimeout);
 
     if (!response.ok) {
       return res.status(response.status).json({
