@@ -10,8 +10,8 @@ RUN npm install
 COPY public ./public
 COPY src ./src
 
-# Installa recharts se non presente
-RUN npm install recharts --save
+# Assicura che tutte le dipendenze siano installate (inclusi react-markdown e remark-gfm)
+RUN npm install
 
 # Esponi la porta di React
 EXPOSE 3000

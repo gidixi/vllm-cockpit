@@ -19,10 +19,15 @@ services:
       - ~/.cache/huggingface:/root/.cache/huggingface
       # Monta directory per configurazioni salvate
       - ./configs:/app/configs
+      # Monta CUDA toolkit dal host per permettere compilazione JIT di flashinfer
+      - /usr/local/cuda:/usr/local/cuda:ro
     environment:
-      - PATH=/app/venv/bin:/usr/local/bin:/usr/bin:/bin
+      - PATH=/usr/local/cuda/bin:/app/venv/bin:/usr/local/bin:/usr/bin:/bin
       - PYTHONPATH=/app/venv/lib/python3.11/site-packages
       - VIRTUAL_ENV=/app/venv
+      - CUDA_HOME=/usr/local/cuda
+      - CUDA_PATH=/usr/local/cuda
+      - LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/lib:${LD_LIBRARY_PATH}
     ports:
       - "3001:3001"
       - "8000:8000"   # vLLM API (chat/completions)

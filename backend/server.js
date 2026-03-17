@@ -192,6 +192,33 @@ async function startVLLM(config) {
     args.push('--mm-processor-cache-type', config.mmProcessorCacheType.trim());
   }
 
+  // Limit multimodal tokens per prompt
+  // vLLM si aspetta un JSON string, quindi se è già un oggetto lo convertiamo
+  // Se è una stringa nel formato "key=value", lo convertiamo in JSON
+  if (config.limitMmPerPrompt !== undefined && config.limitMmPerPrompt !== null) {
+    let limitMmValue = config.limitMmPerPrompt;
+    
+    // Se è una stringa nel formato "key=value", convertila in JSON
+    if (typeof limitMmValue === 'string' && limitMmValue.includes('=')) {
+      const parts = limitMmValue.split('=');
+      if (parts.length === 2) {
+        const key = parts[0].trim();
+        const value = parts[1].trim();
+        // Prova a convertire il valore in numero se possibile
+        const numValue = isNaN(value) ? value : Number(value);
+        limitMmValue = JSON.stringify({ [key]: numValue });
+      }
+    } else if (typeof limitMmValue === 'object') {
+      // Se è già un oggetto, convertilo in JSON string
+      limitMmValue = JSON.stringify(limitMmValue);
+    } else {
+      // Altrimenti usa come stringa
+      limitMmValue = limitMmValue.toString();
+    }
+    
+    args.push('--limit-mm-per-prompt', limitMmValue);
+  }
+
   // Reasoning parser
   if (config.reasoningParser && config.reasoningParser.trim() !== '') {
     args.push('--reasoning-parser', config.reasoningParser.trim());
@@ -430,6 +457,7 @@ app.post('/api/start', async (req, res) => {
     servedModelName: '',
     mmEncoderTpMode: '',
     mmProcessorCacheType: '',
+    limitMmPerPrompt: undefined,
     reasoningParser: '',
   };
 

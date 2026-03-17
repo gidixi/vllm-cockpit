@@ -1,11 +1,14 @@
 FROM node:18-slim
 
 # Installa Python 3.11, nvidia-smi e dipendenze necessarie
+# Includi build-essential e ninja-build per compilazione CUDA JIT (flashinfer)
 RUN apt-get update && apt-get install -y \
     python3.11 \
     python3.11-venv \
     python3-pip \
     curl \
+    build-essential \
+    ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
 # Installa nvidia-smi (se disponibile)
