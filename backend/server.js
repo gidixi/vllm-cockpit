@@ -17,56 +17,22 @@ app.use(bodyParser.json());
 let vllmProcess = null;
 let vllmLogs = [];
 let vllmStatus = 'stopped';
-let lastStartedConfig = { port: 8000 };
-
-function getVllmBaseUrl() {
-  const port = lastStartedConfig?.port || 8000;
-  return `http://127.0.0.1:${port}`;
-}
-
-// Funzione helper per contare le GPU disponibili
-async function getAvailableGpuCount() {
-  try {
-    const { stdout } = await execAsync('nvidia-smi --list-gpus | wc -l', { timeout: 5000 });
-    const count = parseInt(stdout.trim(), 10);
-    return isNaN(count) ? 0 : count;
-  } catch (error) {
-    // Se nvidia-smi non è disponibile, assumi 0 GPU
-    return 0;
-  }
-}
 
 // Funzione per avviare vLLM
-async function startVLLM(config) {
+function startVLLM(config) {
   if (vllmProcess) {
     return { error: 'vLLM è già in esecuzione' };
   }
 
-  // Valida il numero di GPU disponibili per tensor parallelism
-  if (config.tensorParallelSize && config.tensorParallelSize > 1) {
-    const availableGpus = await getAvailableGpuCount();
-    if (availableGpus === 0) {
-      return { error: 'Nessuna GPU disponibile. Verifica che nvidia-smi funzioni correttamente.' };
-    }
-    if (config.tensorParallelSize > availableGpus) {
-      return { 
-        error: `Tensor Parallel Size (${config.tensorParallelSize}) è maggiore del numero di GPU disponibili (${availableGpus}). Riduci il valore o usa --distributed-executor-backend ray per distribuire su più nodi.` 
-      };
-    }
-  }
-
   vllmStatus = 'starting';
   vllmLogs = [];
-  lastStartedConfig = { ...config };
 
   // Costruisci il comando vLLM
-  // Nota: il positional è model_tag, ma l'engine usa args.model (default Qwen se non passato).
-  // Passiamo esplicitamente --model per evitare che venga usato il default.
+  // Usa solo --model (niente positional duplicato): evita ambiguità con argparse e con model_tag.
   // Host: in Docker vLLM deve ascoltare su 0.0.0.0, altrimenti la porta 8000 non è raggiungibile dal port mapping.
   const listenHost = (config.host && config.host.trim() !== '' && config.host !== '127.0.0.1') ? config.host.trim() : '0.0.0.0';
   const args = [
     '-m', 'vllm.entrypoints.openai.api_server',
-    config.model,
     '--model', config.model,
     '--host', listenHost,
     '--port', config.port.toString(),
@@ -160,6 +126,42 @@ async function startVLLM(config) {
     args.push('--trust-remote-code');
   }
 
+  // Tokenizer separato: alcuni repo HF usano tokenizer_class "TokenizersBackend" non riconosciuta da transformers nel venv.
+  // Fallback automatico per Jackrong (anche se la UI non invia config.tokenizer dopo aver solo incollato il model id).
+  const modelId = (config.model && String(config.model).trim()) || '';
+  let jackrongTokenizerFallback = '';
+  if (/^Jackrong\/Qwen3\.5-9B-Claude-4\.6-Opus-Reasoning-Distilled/i.test(modelId)) {
+    jackrongTokenizerFallback = 'Qwen/Qwen3.5-9B';
+  } else if (/^Jackrong\/Qwen3\.5-4B-Claude-4\.6-Opus-Reasoning-Distilled/i.test(modelId)) {
+    jackrongTokenizerFallback = 'Qwen/Qwen3.5-4B';
+  }
+  const tokenizerExplicit =
+    config.tokenizer && String(config.tokenizer).trim() !== ''
+      ? String(config.tokenizer).trim()
+      : '';
+  const tokenizerResolved = tokenizerExplicit || jackrongTokenizerFallback;
+  if (tokenizerResolved) {
+    args.push('--tokenizer', tokenizerResolved);
+    if (jackrongTokenizerFallback && !tokenizerExplicit) {
+      vllmLogs.push(
+        `[INFO] tokenizer fallback: ${jackrongTokenizerFallback} (repo HF usa TokenizersBackend; modello=${modelId})`
+      );
+    }
+  }
+  if (config.tokenizerMode && String(config.tokenizerMode).trim() !== '') {
+    args.push('--tokenizer-mode', String(config.tokenizerMode).trim());
+  }
+
+  // Nome esposto dall'API OpenAI-compatible
+  if (config.servedModelName && String(config.servedModelName).trim() !== '') {
+    args.push('--served-model-name', String(config.servedModelName).trim());
+  }
+
+  // Reasoning (Qwen3 / DeepSeek-R1, ecc.)
+  if (config.reasoningParser && String(config.reasoningParser).trim() !== '') {
+    args.push('--reasoning-parser', String(config.reasoningParser).trim());
+  }
+
   // Tool calling support (required for structured tool calls via OpenAI API)
   // Auto-detect: enable by default for models known to support Hermes-style tool calling
   const isQwen = config.model && /qwen/i.test(config.model);
@@ -175,53 +177,6 @@ async function startVLLM(config) {
     if (toolCallParser) {
       args.push('--tool-call-parser', toolCallParser);
     }
-  }
-
-  // Served model name
-  if (config.servedModelName && config.servedModelName.trim() !== '') {
-    args.push('--served-model-name', config.servedModelName.trim());
-  }
-
-  // Multi-modal encoder tensor parallelism mode
-  if (config.mmEncoderTpMode && config.mmEncoderTpMode.trim() !== '') {
-    args.push('--mm-encoder-tp-mode', config.mmEncoderTpMode.trim());
-  }
-
-  // Multi-modal processor cache type
-  if (config.mmProcessorCacheType && config.mmProcessorCacheType.trim() !== '') {
-    args.push('--mm-processor-cache-type', config.mmProcessorCacheType.trim());
-  }
-
-  // Limit multimodal tokens per prompt
-  // vLLM si aspetta un JSON string, quindi se è già un oggetto lo convertiamo
-  // Se è una stringa nel formato "key=value", lo convertiamo in JSON
-  if (config.limitMmPerPrompt !== undefined && config.limitMmPerPrompt !== null) {
-    let limitMmValue = config.limitMmPerPrompt;
-    
-    // Se è una stringa nel formato "key=value", convertila in JSON
-    if (typeof limitMmValue === 'string' && limitMmValue.includes('=')) {
-      const parts = limitMmValue.split('=');
-      if (parts.length === 2) {
-        const key = parts[0].trim();
-        const value = parts[1].trim();
-        // Prova a convertire il valore in numero se possibile
-        const numValue = isNaN(value) ? value : Number(value);
-        limitMmValue = JSON.stringify({ [key]: numValue });
-      }
-    } else if (typeof limitMmValue === 'object') {
-      // Se è già un oggetto, convertilo in JSON string
-      limitMmValue = JSON.stringify(limitMmValue);
-    } else {
-      // Altrimenti usa come stringa
-      limitMmValue = limitMmValue.toString();
-    }
-    
-    args.push('--limit-mm-per-prompt', limitMmValue);
-  }
-
-  // Reasoning parser
-  if (config.reasoningParser && config.reasoningParser.trim() !== '') {
-    args.push('--reasoning-parser', config.reasoningParser.trim());
   }
 
   // Più log: così si capisce caricamento, download, ecc.
@@ -246,16 +201,14 @@ async function startVLLM(config) {
     // Più log vLLM e Hugging Face (download/cache)
     VLLM_LOGGING_LEVEL: process.env.VLLM_LOGGING_LEVEL || 'INFO',
     HF_HUB_VERBOSITY: process.env.HF_HUB_VERBOSITY || 'info',
-    // CRITICAL: Aumenta timeout RPC per evitare blocchi con reasoning mode e contesto grande
-    // Default è 10000ms (10s), troppo basso quando il modello ragiona con contesto grande
-    // Con reasoning mode, il modello può impiegare molto tempo prima di rispondere
-    VLLM_RPC_TIMEOUT: process.env.VLLM_RPC_TIMEOUT || '300000', // 5 minuti (300s)
   };
 
   // Aggiungi CUDA_VISIBLE_DEVICES se specificato
   if (config.cudaVisibleDevices && config.cudaVisibleDevices.trim() !== '') {
     env.CUDA_VISIBLE_DEVICES = config.cudaVisibleDevices.trim();
   }
+
+  console.log('[vLLM] Comando:', pythonCmd, args.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' '));
   
   vllmProcess = spawn(pythonCmd, args, {
     cwd: '/app',
@@ -304,61 +257,6 @@ async function startVLLM(config) {
   }, 3000);
 
   return { success: true, message: 'vLLM avviato' };
-}
-
-async function callVllm(pathname, options = {}, timeoutMs = 120000) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${getVllmBaseUrl()}${pathname}`, {
-      ...options,
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(options.headers || {}),
-      },
-    });
-    const text = await response.text();
-    let parsedBody = null;
-    try {
-      parsedBody = text ? JSON.parse(text) : null;
-    } catch (_) {
-      parsedBody = text;
-    }
-    return { response, body: parsedBody };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-// Helper per determinare timeout appropriato basato su payload e reasoning
-function getChatTimeout(payload) {
-  // Default timeout: 2 minuti
-  let timeoutMs = 120000;
-  
-  // Se c'è reasoning mode (controlla se c'è thinking parameter o reasoning parser attivo)
-  const hasReasoning = payload?.thinking || payload?.reasoning_budget_tokens;
-  
-  // Stima dimensione payload
-  const payloadSize = JSON.stringify(payload).length;
-  
-  if (hasReasoning) {
-    // Reasoning mode: timeout molto più lungo
-    // Base: 8 minuti (480s)
-    timeoutMs = 480000;
-    
-    // Aggiungi tempo extra per payload grandi
-    if (payloadSize > 100 * 1024) { // > 100KB
-      const extraSize = payloadSize - 100 * 1024;
-      const extraTime = (extraSize / (10 * 1024)) * 2000; // 2s per 10KB
-      timeoutMs = Math.min(timeoutMs + extraTime, 900000); // Max 15 minuti
-    }
-  } else if (payloadSize > 100 * 1024) {
-    // Payload grande senza reasoning: timeout moderato
-    timeoutMs = 300000; // 5 minuti
-  }
-  
-  return timeoutMs;
 }
 
 // Funzione per fermare vLLM
@@ -421,7 +319,7 @@ app.get('/api/check-port-8000', async (req, res) => {
 });
 
 // Start vLLM
-app.post('/api/start', async (req, res) => {
+app.post('/api/start', (req, res) => {
   const config = req.body;
   
   // Valori di default
@@ -454,25 +352,15 @@ app.post('/api/start', async (req, res) => {
     // Tool calling: auto-detected per model in startVLLM(); leave undefined to use auto-detect
     // enableAutoToolChoice: undefined,
     // toolCallParser: '',
-    servedModelName: '',
-    mmEncoderTpMode: '',
-    mmProcessorCacheType: '',
-    limitMmPerPrompt: undefined,
-    reasoningParser: '',
   };
 
   const finalConfig = { ...defaultConfig, ...config };
+  const result = startVLLM(finalConfig);
   
-  try {
-    const result = await startVLLM(finalConfig);
-    
-    if (result.error) {
-      res.status(400).json(result);
-    } else {
-      res.json(result);
-    }
-  } catch (error) {
-    res.status(500).json({ error: error.message || 'Errore interno del server' });
+  if (result.error) {
+    res.status(400).json(result);
+  } else {
+    res.json(result);
   }
 });
 
@@ -596,6 +484,14 @@ app.get('/api/gpus', async (req, res) => {
       .filter(line => line.trim().length > 0)
       .map((line, index) => {
         const parts = line.split(', ').map(p => p.trim());
+        const rawPower = parts[7];
+        let powerDraw = null;
+        if (rawPower && rawPower !== '[N/A]') {
+          const p = parseFloat(rawPower);
+          if (Number.isFinite(p)) {
+            powerDraw = Math.round(p * 100) / 100;
+          }
+        }
         return {
           index: parseInt(parts[0]) || index,
           name: parts[1] || 'Unknown',
@@ -604,7 +500,7 @@ app.get('/api/gpus', async (req, res) => {
           memoryFree: parseInt(parts[4]) || 0,
           utilization: parseInt(parts[5]) || 0,
           temperature: parseInt(parts[6]) || 0,
-          powerDraw: parseInt(parts[7]) || 0,
+          powerDraw,
         };
       });
 
@@ -617,121 +513,6 @@ app.get('/api/gpus', async (req, res) => {
       available: false,
       error: error.message || 'nvidia-smi non disponibile o nessuna GPU rilevata'
     });
-  }
-});
-
-// Modelli esposti dall'API OpenAI-compatible di vLLM
-app.get('/api/vllm/models', async (req, res) => {
-  try {
-    const { response, body } = await callVllm('/v1/models', {}, 10000);
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error: 'Errore nel recupero modelli da vLLM',
-        details: body,
-      });
-    }
-    res.json(body);
-  } catch (error) {
-    const message = error.name === 'AbortError'
-      ? 'Timeout nel recupero modelli da vLLM'
-      : `vLLM non raggiungibile: ${error.message}`;
-    res.status(502).json({ error: message });
-  }
-});
-
-// Chat test: proxy verso /v1/chat/completions
-app.post('/api/chat', async (req, res) => {
-  try {
-    const requestStartedAt = Date.now();
-    const {
-      messages,
-      systemPrompt,
-      model,
-      temperature = 0.7,
-      max_tokens = 512,
-    } = req.body || {};
-
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({ error: 'messages deve essere un array non vuoto' });
-    }
-
-    const sanitizedMessages = messages
-      .filter((m) => m && typeof m.content === 'string' && m.content.trim() !== '')
-      .map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
-
-    if (sanitizedMessages.length === 0) {
-      return res.status(400).json({ error: 'Nessun messaggio valido da inviare a vLLM' });
-    }
-
-    let selectedModel = (typeof model === 'string' && model.trim() !== '') ? model.trim() : '';
-    if (!selectedModel) {
-      const modelResult = await callVllm('/v1/models', {}, 10000);
-      if (modelResult.response.ok && Array.isArray(modelResult.body?.data) && modelResult.body.data.length > 0) {
-        selectedModel = modelResult.body.data[0].id;
-      }
-    }
-
-    if (!selectedModel) {
-      return res.status(400).json({
-        error: 'Nessun modello disponibile. Avvia vLLM e verifica /v1/models.',
-      });
-    }
-
-    const finalMessages = [];
-    if (typeof systemPrompt === 'string' && systemPrompt.trim() !== '') {
-      finalMessages.push({ role: 'system', content: systemPrompt.trim() });
-    }
-    finalMessages.push(...sanitizedMessages);
-
-    const payload = {
-      model: selectedModel,
-      messages: finalMessages,
-      temperature: Number.isFinite(Number(temperature)) ? Number(temperature) : 0.7,
-      max_tokens: Number.isFinite(Number(max_tokens)) ? Number(max_tokens) : 512,
-      stream: false,
-    };
-
-    // Calcola timeout appropriato per questa richiesta
-    const chatTimeout = getChatTimeout(payload);
-    
-    const { response, body } = await callVllm('/v1/chat/completions', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }, chatTimeout);
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error: 'Errore dalla chat vLLM',
-        details: body,
-      });
-    }
-
-    const usage = body && typeof body === 'object' ? (body.usage || null) : null;
-    const proxyStats = {
-      latencyMs: Date.now() - requestStartedAt,
-      model: selectedModel,
-      usage: usage
-        ? {
-            promptTokens: usage.prompt_tokens || 0,
-            completionTokens: usage.completion_tokens || 0,
-            totalTokens: usage.total_tokens || 0,
-          }
-        : null,
-    };
-
-    if (body && typeof body === 'object' && !Array.isArray(body)) {
-      return res.json({
-        ...body,
-        _proxyStats: proxyStats,
-      });
-    }
-
-    return res.json({ data: body, _proxyStats: proxyStats });
-  } catch (error) {
-    const message = error.name === 'AbortError'
-      ? 'Timeout durante la generazione della risposta'
-      : `Errore chiamata chat: ${error.message}`;
-    return res.status(502).json({ error: message });
   }
 });
 

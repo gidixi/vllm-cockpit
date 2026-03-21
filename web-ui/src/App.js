@@ -1371,7 +1371,7 @@ function App() {
                                       <dt className="col-sm-6">Temperatura:</dt>
                                       <dd className="col-sm-6">{gpu.temperature}°C</dd>
                                       <dt className="col-sm-6">Consumo Energetico:</dt>
-                                      <dd className="col-sm-6">{gpu.powerDraw} W</dd>
+                                      <dd className="col-sm-6">{gpu.powerDraw != null ? `${gpu.powerDraw} W` : 'N/D'}</dd>
                                       <dt className="col-sm-6">Memoria Usata:</dt>
                                       <dd className="col-sm-6">{gpu.memoryUsed} MB</dd>
                                       <dt className="col-sm-6">Memoria Totale:</dt>
